@@ -1,0 +1,66 @@
+name: SheetViewController CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - master
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  DEVELOPER_DIR: /Applications/Xcode_26.5.app/Contents/Developer
+
+jobs:
+  swift-package:
+    name: Swift Package (${{ matrix.configuration }})
+    runs-on: macos-26
+    timeout-minutes: 15
+
+    strategy:
+      fail-fast: false
+      matrix:
+        configuration:
+          - Debug
+          - Release
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Verify Xcode and Swift versions
+        shell: bash
+        run: |
+          xcodebuild -version
+          xcrun swift --version
+
+          xcode_version="$(xcodebuild -version | awk 'NR == 1 { print $2 }')"
+          if [[ "$xcode_version" != "26.5" ]]; then
+            echo "Expected Xcode 26.5, found $xcode_version" >&2
+            exit 1
+          fi
+
+          if ! xcrun swift --version | grep -Fq "Apple Swift version 6.3.2"; then
+            echo "Expected Apple Swift 6.3.2" >&2
+            exit 1
+          fi
+
+      - name: Validate package manifest
+        run: swift package dump-package > /dev/null
+
+      - name: Build package
+        shell: bash
+        env:
+          CONFIGURATION: ${{ matrix.configuration }}
+        run: |
+          configuration="$(echo "$CONFIGURATION" | tr "[:upper:]" "[:lower:]")"
+          sdk_path="$(xcrun --sdk iphonesimulator --show-sdk-path)"
+          swift build \
+            --configuration "$configuration" \
+            --sdk "$sdk_path" \
+            --triple arm64-apple-ios13.0-simulator
