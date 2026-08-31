@@ -1,0 +1,130 @@
+name: Auto Tag
+
+on:
+  pull_request_target:
+    branches:
+      - master
+    types:
+      - closed
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    name: Create release tag
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout master
+        uses: actions/checkout@v7.0.1
+        with:
+          ref: master
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Resolve release tag
+        id: release
+        shell: bash
+        run: |
+          node <<'NODE'
+          const { execFileSync } = require("node:child_process");
+          const fs = require("node:fs");
+
+          const event = JSON.parse(
+            fs.readFileSync(process.env.GITHUB_EVENT_PATH, "utf8")
+          );
+          const body = event.pull_request?.body ?? "";
+          const releaseTagLine = /^Release-Tag:\s*(.*?)\s*$/im.exec(body);
+          const requestedTag = releaseTagLine?.[1] ?? "";
+          const semverPattern = /^(\d+)\.(\d+)\.(\d+)$/;
+          const tags = execFileSync("git", ["tag", "--list"], {
+            encoding: "utf8"
+          })
+            .split("\n")
+            .filter(Boolean);
+
+          function parseSemver(tag) {
+            const match = semverPattern.exec(tag);
+            return match
+              ? match.slice(1).map((component) => Number(component))
+              : null;
+          }
+
+          function compareSemver(left, right) {
+            for (let index = 0; index < 3; index += 1) {
+              if (left[index] !== right[index]) {
+                return left[index] - right[index];
+              }
+            }
+            return 0;
+          }
+
+          const semverTags = tags
+            .map((tag) => ({ tag, version: parseSemver(tag) }))
+            .filter(({ version }) => version !== null)
+            .sort((left, right) => compareSemver(right.version, left.version));
+          const latest = semverTags[0] ?? null;
+          let tag;
+          let source;
+
+          if (requestedTag) {
+            const requestedVersion = parseSemver(requestedTag);
+
+            if (!requestedVersion) {
+              throw new Error(
+                `Release-Tag must use the x.y.z format without a v prefix: ${requestedTag}`
+              );
+            }
+            if (tags.includes(requestedTag)) {
+              throw new Error(`Release tag already exists: ${requestedTag}`);
+            }
+            if (latest && compareSemver(requestedVersion, latest.version) <= 0) {
+              throw new Error(
+                `Release-Tag must be greater than the latest tag ${latest.tag}: ${requestedTag}`
+              );
+            }
+
+            tag = requestedTag;
+            source = "PR description";
+          } else if (latest) {
+            const [major, minor, patch] = latest.version;
+            tag = `${major}.${minor}.${patch + 1}`;
+            source = `patch increment from ${latest.tag}`;
+          } else {
+            tag = "0.1.0";
+            source = "initial version";
+          }
+
+          fs.appendFileSync(
+            process.env.GITHUB_OUTPUT,
+            `tag=${tag}\nsource=${source}\n`
+          );
+          console.log(`Resolved ${tag} from ${source}.`);
+          NODE
+
+      - name: Create annotated tag
+        shell: bash
+        env:
+          MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          git cat-file -e "${MERGE_SHA}^{commit}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$RELEASE_TAG" "$MERGE_SHA" -m "Release $RELEASE_TAG"
+          git push origin "refs/tags/$RELEASE_TAG"
+
+      - name: Summarize release tag
+        shell: bash
+        env:
+          RELEASE_SOURCE: ${{ steps.release.outputs.source }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          {
+            echo "## Release tag"
+            echo
+            echo "Created annotated tag `$RELEASE_TAG` from $RELEASE_SOURCE."
+          } >> "$GITHUB_STEP_SUMMARY"
